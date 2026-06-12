@@ -3,7 +3,7 @@ node_modules/
 /jspm_packages/
 
 # Build outputs
-/dist/
+**/dist/
 /build/
 /.next/
 /out/
@@ -12,7 +12,9 @@ node_modules/
 # Go binaries and files
 indexer/trusttrove-indexer
 indexer/trusttrove-indexer.exe
+indexer/indexer.exe
 *.wasm
+*.exe
 
 # Debug logs
 npm-debug.log*

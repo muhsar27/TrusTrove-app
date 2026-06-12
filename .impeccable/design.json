@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-06-12T02:10:40Z",
+  "title": "Design System: TrusTrove Terminal",
+  "extensions": {
+    "colorMeta": {
+      "primary": { "role": "primary", "displayName": "Electric Teal", "canonical": "oklch(82.68% 0.189 168.45)", "tonalRamp": ["#001a14", "#003328", "#004d3d", "#006651", "#00d4aa", "#40dfc2", "#9ff0e1", "#dcfaf5"] },
+      "primary-hover": { "role": "primary", "displayName": "Electric Teal Hover", "canonical": "oklch(76.42% 0.181 169.21)", "tonalRamp": ["#00140f", "#00291e", "#003d2e", "#00523e", "#00b38f", "#33ccab", "#94edd9", "#d4faf2"] },
+      "accent-active": { "role": "accent", "displayName": "Ocean Blue", "canonical": "oklch(60.16% 0.208 256.78)", "tonalRamp": ["#001a4d", "#002b80", "#0040b3", "#0059e6", "#3b82f6", "#6699ff", "#b3ccff", "#e6f0ff"] },
+      "accent-success": { "role": "accent", "displayName": "Success Emerald", "canonical": "oklch(72.77% 0.169 152.05)", "tonalRamp": ["#00331a", "#004d26", "#006633", "#008040", "#10b981", "#40df9f", "#9ff0cc", "#dcfaf0"] },
+      "accent-warning": { "role": "accent", "displayName": "Risk Amber", "canonical": "oklch(75.54% 0.181 72.84)", "tonalRamp": ["#331d00", "#4d2b00", "#663a00", "#804800", "#f59e0b", "#ffbf40", "#ffe39f", "#fff6e0"] },
+      "neutral-bg": { "role": "neutral", "displayName": "Void Background", "canonical": "oklch(14.82% 0.015 250.23)", "tonalRamp": ["#010204", "#040608", "#080c10", "#101820", "#1a2530", "#304153", "#566e86", "#9cb2c9"] },
+      "neutral-card": { "role": "neutral", "displayName": "Terminal Card", "canonical": "oklch(19.56% 0.018 249.81)", "tonalRamp": ["#020305", "#05070a", "#0d131a", "#161f2b", "#233042", "#3a4d66", "#617796", "#a6b8d1"] },
+      "border": { "role": "neutral", "displayName": "Grid Border", "canonical": "oklch(26.11% 0.022 251.04)", "tonalRamp": ["#070a0d", "#0d1117", "#1a2330", "#283447", "#394a63", "#526785", "#7992b4", "#b9c7db"] }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display Sans", "purpose": "Titles and major metrics." },
+      "body": { "displayName": "Body Sans", "purpose": "Descriptions and labels." },
+      "mono": { "displayName": "Value Mono", "purpose": "Financial amounts, address keys, status logs." }
+    },
+    "shadows": [
+      { "name": "teal-glow-hover", "value": "0 0 24px rgba(0, 212, 170, 0.15)", "purpose": "Active liquidity indicator glow when hovered." },
+      { "name": "focus-ring", "value": "0 0 0 2px rgba(0, 212, 170, 0.2)", "purpose": "Glowing focus boundary around input cursors." }
+    ]
+  },
+  "components": [
+    {
+      "name": "Terminal Button Primary",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Solid Electric Teal button with high-contrast dark text and clean hover micro-transform.",
+      "html": "<button class=\"ds-btn-terminal-primary\">FUND INVOICE</button>",
+      "css": ".ds-btn-terminal-primary { background: #00d4aa; color: #080c10; font-family: var(--font-sans), sans-serif; font-size: 13px; font-weight: 700; padding: 12px 20px; border: none; border-radius: 8px; cursor: pointer; text-transform: uppercase; letter-spacing: 0.05em; transition: all 0.2s ease-out; } .ds-btn-terminal-primary:hover { background: #00b38f; box-shadow: 0 0 16px rgba(0, 212, 170, 0.3); } .ds-btn-terminal-primary:active { transform: scale(0.98); }"
+    },
+    {
+      "name": "Terminal Card Container",
+      "kind": "card",
+      "refersTo": "card-container",
+      "description": "Grid-separated dark card reflecting a Bloomberg Terminal widget layout.",
+      "html": "<div class=\"ds-terminal-card\"><div class=\"ds-tc-label\">Pool Value</div><div class=\"ds-tc-amount\">450,230.00 USDC</div></div>",
+      "css": ".ds-terminal-card { background: #0d131a; border: 1px solid #1a2330; border-radius: 12px; padding: 20px; transition: all 0.2s ease-out; } .ds-terminal-card:hover { border-color: #00d4aa; box-shadow: 0 0 24px rgba(0, 212, 170, 0.15); } .ds-tc-label { font-family: var(--font-sans), sans-serif; font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 6px; } .ds-tc-amount { font-family: var(--font-mono), monospace; font-size: 20px; font-weight: 700; color: #f1f5f9; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Operations Terminal",
+    "overview": "The TrusTrove interface is modeled on professional financial execution environments (Bloomberg Terminal, Reuters Eikon). It avoids consumer-grade DeFi trends in favor of high-density data, sharp typography contrast, and immediate functional feedback. Surfaces use a dark navy-black void background (#080c10) with thin slate borders (#1a2330) to establish a clear architectural grid.",
+    "keyCharacteristics": [
+      "Deep space backgrounds (#080c10) with flat containers (#0d131a).",
+      "High text-density tables, stats rolls, and timeline tracking.",
+      "Inter for UI controls and labels; JetBrains Mono for monetary values, addresses, and hashes.",
+      "Hover states project a bright teal glow (0 0 24px rgba(0,212,170,0.15)) representing active liquidity."
+    ],
+    "rules": [
+      { "name": "The State Map Rule", "body": "The INVOICE STATUS COLOR MAP must be implemented uniformly across the entire app interface.", "section": "colors" },
+      { "name": "The Flat Grid Rule", "body": "Surfaces are flat and share the same visual plane. Hover states do not raise cards; they activate the teal border and emit a glowing aura to denote active liquidity.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do format all financial figures in JetBrains Mono with comma separators and the USDC suffix (e.g. 50,000.00 USDC).",
+      "Do display address strings in monospace, truncated in the middle with a copy-to-clipboard control.",
+      "Do implement skeleton shimmers instead of loading spinners to prevent layout shifts.",
+      "Do optimize dashboard cards and status timelines for responsive, thumb-reachable triggers on mobile screens (375px+)."
+    ],
+    "donts": [
+      "Don't use generic rounded buttons or card shadows.",
+      "Don't show playful illustrations, mascot graphics, or neon-gradient SaaS bubbles.",
+      "Don't hide fees or display calculated yield ranges without displaying the utilization-based formula.",
+      "Don't animate <img> elements on hover."
+    ]
+  }
+}
