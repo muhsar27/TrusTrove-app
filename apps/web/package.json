@@ -14,6 +14,7 @@
     "@stellar/stellar-sdk": "^13.3.0",
     "@tanstack/react-query": "^5.101.0",
     "@trusttrove/sdk": "workspace:*",
+    "@vercel/analytics": "^2.0.1",
     "@vercel/speed-insights": "^2.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
