@@ -50,6 +50,9 @@ func LoadConfig() (*Config, error) {
 
 	apiPort := os.Getenv("API_PORT")
 	if apiPort == "" {
+		apiPort = os.Getenv("PORT") // Render provides PORT automatically
+	}
+	if apiPort == "" {
 		apiPort = "8080"
 	}
 

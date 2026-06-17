@@ -39,3 +39,4 @@ pnpm-debug.log*
 *.sw?
 .DS_Store
 Thumbs.db
+.neon
