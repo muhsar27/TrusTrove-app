@@ -70,6 +70,8 @@ export function useBalances() {
 
   useEffect(() => {
     fetchBalances();
+    const interval = setInterval(fetchBalances, 30000);
+    return () => clearInterval(interval);
   }, [fetchBalances]);
 
   return { balances, loading, error, refetch: fetchBalances };

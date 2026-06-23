@@ -4,9 +4,10 @@ import React from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { WalletConnect } from './WalletConnect';
+import { SkeletonShimmer } from './SkeletonLoader';
 import { useWalletStore } from '@/store/wallet';
 import { useBalances } from '@/hooks/useBalances';
-import { Wallet, Shield, Terminal } from 'lucide-react';
+import { Wallet, Shield, Terminal, ExternalLink } from 'lucide-react';
 
 export function Navbar() {
   const pathname = usePathname();
@@ -58,23 +59,32 @@ export function Navbar() {
               <>
                 {/* Balances */}
                 <div className="hidden md:flex items-center gap-3 bg-neutral-900 border border-border rounded-lg px-3 py-1">
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 group relative">
                     <Wallet className="w-3 h-3 text-sky-400" />
                     {balancesLoading ? (
-                      <span className="text-[10px] text-slate-500 font-mono animate-pulse">...</span>
+                      <SkeletonShimmer className="h-3.5 w-14" />
                     ) : (
-                      <span className="text-[10px] font-mono text-slate-300 font-bold">
-                        {balances.usdc !== null
-                          ? `${parseFloat(balances.usdc).toLocaleString(undefined, { maximumFractionDigits: 2 })} USDC`
-                          : '— USDC'}
-                      </span>
+                      <>
+                        <span className="text-[10px] font-mono text-slate-300 font-bold">
+                          {balances.usdc !== null
+                            ? `${parseFloat(balances.usdc).toLocaleString(undefined, { maximumFractionDigits: 2 })} USDC`
+                            : '— USDC'}
+                        </span>
+                        {(balances.usdc === null || parseFloat(balances.usdc) === 0) && (
+                          <div className="absolute -top-8 left-1/2 -translate-x-1/2 hidden group-hover:block whitespace-nowrap bg-amber-500/10 border border-amber-500/20 text-amber-400 text-[10px] font-mono px-2 py-1 rounded-md shadow-lg z-50">
+                            <a href="https://demo.stellar.org" target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 hover:underline">
+                              Get testnet USDC <ExternalLink className="w-3 h-3" />
+                            </a>
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                   <div className="w-px h-3 bg-border" />
                   <div className="flex items-center gap-1.5">
                     <Wallet className="w-3 h-3 text-amber-400" />
                     {balancesLoading ? (
-                      <span className="text-[10px] text-slate-500 font-mono animate-pulse">...</span>
+                      <SkeletonShimmer className="h-3.5 w-14" />
                     ) : (
                       <span className="text-[10px] font-mono text-slate-300 font-bold">
                         {balances.xlm !== null
