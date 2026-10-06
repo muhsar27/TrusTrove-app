@@ -2,6 +2,7 @@ package listener
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -303,6 +304,15 @@ func (l *EventListener) pollEvents(ctx context.Context, startLedger int32) (int3
 			// Once an event has entered processing, cancellation only stops new
 			// polls; the transaction and webhook enqueue may finish atomically.
 			if err := l.handleEvent(context.WithoutCancel(ctx), sorobanEv); err != nil {
+				if errors.Is(err, db.ErrInvoiceNotFound) {
+					// The invoice row is not indexed yet (issue #927): the
+					// transaction rolled back, so nothing was recorded as
+					// processed. Warn with the event id and return the error
+					// so Start backs off and retries this ledger range once
+					// the missing InvoiceCreated has landed.
+					slog.Warn("Invoice not found for event; will retry",
+						"event_id", sorobanEv.ID, "error", err)
+				}
 				return startLedger, fmt.Errorf("handle event %s: %w", sorobanEv.ID, err)
 			}
 		}

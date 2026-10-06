@@ -3,6 +3,7 @@ package listener
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -526,6 +527,13 @@ func (l *EventListener) handleEvent(ctx context.Context, event SorobanEvent) err
 		// it while parsing; for invoice events the keys are extracted after
 		// the switch below.
 		logData := map[string]interface{}{}
+		// stale marks an event the db lifecycle guard rejected (issue #927):
+		// the invoice is already at a newer status, so the event is recorded
+		// as processed below without applying a state change or firing
+		// webhooks. ErrInvoiceNotFound never reaches here as stale — it falls
+		// through as a hard error so the transaction rolls back and the poller
+		// retries instead of recording a lost state change as processed.
+		stale := false
 
 		switch eventName {
 		case "create", "InvoiceCreated":
@@ -562,7 +570,16 @@ func (l *EventListener) handleEvent(ctx context.Context, event SorobanEvent) err
 			return nil
 		}
 		if err != nil {
-			return fmt.Errorf("handler for %s failed: %w", eventName, err)
+			if !errors.Is(err, db.ErrStaleStatusTransition) {
+				return fmt.Errorf("handler for %s failed: %w", eventName, err)
+			}
+			// A replayed or out-of-order event must not move the invoice
+			// backwards. Warn with the event id, then fall through so
+			// events_log still records it — otherwise the poller would refetch
+			// an event that must never be applied.
+			slog.Warn("Skipping stale invoice event",
+				"event_id", event.ID, "event", eventName, "error", err)
+			stale = true
 		}
 
 		// Try to extract invoice_id from topic[1] for events that carry it
@@ -603,8 +620,9 @@ func (l *EventListener) handleEvent(ctx context.Context, event SorobanEvent) err
 		// Enqueue webhook deliveries on the same transaction (issue #925):
 		// the fan-out either commits with the event or is retried with it.
 		// Events the switch above does not recognise never reach this point —
-		// the default branch skips them before any row is written.
-		if l.dispatcher != nil {
+		// the default branch skips them before any row is written — and a
+		// stale event (issue #927) changes no state, so nothing to announce.
+		if !stale && l.dispatcher != nil {
 			if err := l.dispatcher.EnqueueDeliveries(ctx, tx, eventName, l.webhookDispatchData(ctx, tx, eventName, event, ledgerClosedAt, logData)); err != nil {
 				return fmt.Errorf("enqueue webhook deliveries: %w", err)
 			}

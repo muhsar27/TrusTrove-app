@@ -3,6 +3,7 @@ package listener
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -993,5 +994,148 @@ func TestHandleEventCommitsStateAndLogTogether(t *testing.T) {
 	}
 	if !processed {
 		t.Error("IsEventProcessed: got false, want true (events_log row must commit with the state change)")
+	}
+}
+
+// TestHandleEventMissingInvoiceNotRecorded covers issue #927's listener
+// criterion: when the invoice row does not exist, handleEvent must return a
+// wrapped db.ErrInvoiceNotFound and roll back — the event is NOT recorded as
+// processed and no webhooks fire, so the poller retries the ledger once the
+// missing InvoiceCreated has landed instead of losing the state change.
+func TestHandleEventMissingInvoiceNotRecorded(t *testing.T) {
+	skipIfNoDB(t)
+
+	l := newTestListener()
+	ctx := context.Background()
+
+	rawIDBytes := []byte(fmt.Sprintf("missingev%d", time.Now().UnixNano()))
+	invoiceIDHex := fmt.Sprintf("%x", rawIDBytes)
+	eventID := fmt.Sprintf("event-missing-invoice-%d", time.Now().UnixNano())
+	rec := &recordingDispatcher{}
+	l.dispatcher = rec
+	t.Cleanup(func() {
+		if db.Pool != nil {
+			_, _ = db.Pool.Exec(ctx, "DELETE FROM events_log WHERE event_id = $1", eventID)
+		}
+	})
+
+	idScBytes := xdr.ScBytes(rawIDBytes)
+	idTopic := encodeScVal(xdr.ScVal{Type: xdr.ScValTypeScvBytes, Bytes: &idScBytes})
+	event := SorobanEvent{
+		ID:             eventID,
+		ContractID:     "CAKEWH7SJCXGV2MH2WZYIX3QDPTSSBQFXYVYBOWAGLNBBZMPLE2US6CS",
+		Ledger:         1302,
+		LedgerClosedAt: time.Now().Format(time.RFC3339),
+		Topic:          []string{encodeSymbol("fund_invoice"), idTopic},
+		Value:          makeU128PairValue(950000000, 0),
+	}
+
+	err := l.handleEvent(ctx, event)
+	if !errors.Is(err, db.ErrInvoiceNotFound) {
+		t.Fatalf("handleEvent(fund_invoice) for unknown invoice: got %v, want wrapped db.ErrInvoiceNotFound", err)
+	}
+
+	// The transaction must have rolled back: the event stays unprocessed so
+	// the poller retries it rather than marking a lost update as done.
+	processed, perr := db.IsEventProcessed(ctx, eventID)
+	if perr != nil {
+		t.Fatalf("IsEventProcessed: %v", perr)
+	}
+	if processed {
+		t.Error("IsEventProcessed: got true, want false (event must not be recorded as processed)")
+	}
+	if rec.calls != 0 {
+		t.Errorf("webhook enqueue calls = %d, want 0 (nothing was applied)", rec.calls)
+	}
+
+	// Sanity: the invoice was never created, and the failed event must not
+	// have conjured one either.
+	got, gerr := db.GetInvoiceByID(ctx, db.Pool, invoiceIDHex)
+	if gerr != nil {
+		t.Fatalf("GetInvoiceByID: %v", gerr)
+	}
+	if got != nil {
+		t.Errorf("GetInvoiceByID: got %+v, want nil (no invoice may exist)", got)
+	}
+}
+
+// TestHandleEventStaleInvoiceEventRecordedNotApplied covers the other half
+// of issue #927's listener criteria: a replayed older event must not move the
+// invoice backwards, but unlike a missing invoice it IS recorded as processed
+// (after a warn log) so the poller does not refetch an event that must never
+// be applied — and no webhooks fire for a state change that never happened.
+func TestHandleEventStaleInvoiceEventRecordedNotApplied(t *testing.T) {
+	skipIfNoDB(t)
+
+	l := newTestListener()
+	ctx := context.Background()
+
+	const (
+		issuer = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"
+		buyer  = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN"
+	)
+	rawIDBytes := []byte(fmt.Sprintf("staleev%d", time.Now().UnixNano()))
+	invoiceIDHex := fmt.Sprintf("%x", rawIDBytes)
+	eventID := fmt.Sprintf("event-stale-listed-%d", time.Now().UnixNano())
+	rec := &recordingDispatcher{}
+	l.dispatcher = rec
+
+	inv := &db.DbInvoice{
+		ID:           invoiceIDHex,
+		Issuer:       issuer,
+		Buyer:        buyer,
+		FaceValue:    "1000000000",
+		FundedAmount: "1000000000",
+		DueDate:      time.Now().Add(30 * 24 * time.Hour).Unix(),
+		Status:       "Funded",
+		CreatedAt:    time.Now().Unix(),
+	}
+	if err := db.InsertInvoice(ctx, db.Pool, inv); err != nil {
+		t.Fatalf("setup InsertInvoice: %v", err)
+	}
+	t.Cleanup(func() {
+		if db.Pool != nil {
+			_, _ = db.Pool.Exec(ctx, "DELETE FROM invoices WHERE id = $1", invoiceIDHex)
+			_, _ = db.Pool.Exec(ctx, "DELETE FROM events_log WHERE event_id = $1", eventID)
+		}
+	})
+
+	idScBytes := xdr.ScBytes(rawIDBytes)
+	idTopic := encodeScVal(xdr.ScVal{Type: xdr.ScValTypeScvBytes, Bytes: &idScBytes})
+	discount := xdr.Uint32(500)
+	discountVal := xdr.ScVal{Type: xdr.ScValTypeScvU32, U32: &discount}
+	event := SorobanEvent{
+		ID:             eventID,
+		ContractID:     "CAKEWH7SJCXGV2MH2WZYIX3QDPTSSBQFXYVYBOWAGLNBBZMPLE2US6CS",
+		Ledger:         1303,
+		LedgerClosedAt: time.Now().Format(time.RFC3339),
+		Topic:          []string{encodeSymbol("list_for_financing"), idTopic},
+		Value:          encodeScVal(discountVal),
+	}
+
+	if err := l.handleEvent(ctx, event); err != nil {
+		t.Fatalf("handleEvent(stale list_for_financing): %v", err)
+	}
+
+	got, err := db.GetInvoiceByID(ctx, db.Pool, invoiceIDHex)
+	if err != nil || got == nil {
+		t.Fatalf("GetInvoiceByID: err=%v, got=%v", err, got)
+	}
+	if got.Status != "Funded" {
+		t.Errorf("Status after stale event: got %q, want %q (must not move backwards)", got.Status, "Funded")
+	}
+	if got.DiscountBps != 0 {
+		t.Errorf("DiscountBps after stale listed event: got %d, want 0 (stale update must not apply)", got.DiscountBps)
+	}
+
+	processed, err := db.IsEventProcessed(ctx, eventID)
+	if err != nil {
+		t.Fatalf("IsEventProcessed: %v", err)
+	}
+	if !processed {
+		t.Error("IsEventProcessed: got false, want true (stale event is recorded so it is not refetched)")
+	}
+	if rec.calls != 0 {
+		t.Errorf("webhook enqueue calls = %d, want 0 (no state change, no fan-out)", rec.calls)
 	}
 }

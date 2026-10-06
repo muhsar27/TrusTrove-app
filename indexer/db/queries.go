@@ -227,95 +227,177 @@ func GetInvoicesPage(ctx context.Context, status, issuer string, limit, offset i
 	return invoices, total, nil
 }
 
+// invoiceStatusRank is the allowed invoice status machine (issue #927):
+//
+//	Created -> Listed -> Funded -> Active -> Confirmed -> Repaid
+//	                                              \-> Defaulted
+//
+// Repaid and Defaulted are mutually exclusive terminal states (same rank).
+// Every status-changing Update* writer below guards its statement with
+// `status = ANY(<statuses ranked below the target>)`, so a replayed or
+// out-of-order event can never move an invoice backwards: an event whose
+// target status does not rank above the current one matches zero rows and is
+// reported as ErrStaleStatusTransition.
+var invoiceStatusRank = map[string]int{
+	"Created":   0,
+	"Listed":    1,
+	"Funded":    2,
+	"Active":    3,
+	"Confirmed": 4,
+	"Repaid":    5,
+	"Defaulted": 5,
+}
+
+// ErrInvoiceNotFound reports that an invoice UPDATE matched no row because
+// the invoice itself is not in the invoices table yet (the indexer started
+// mid-history, InvoiceCreated was never applied, or events arrived out of
+// order across the contracts). The state change was lost, so the listener
+// must not record such an event as processed — it has to be retried once the
+// row exists (issue #927).
+var ErrInvoiceNotFound = errors.New("invoice not found")
+
+// ErrStaleStatusTransition reports that an invoice UPDATE matched no row
+// because the invoice's current status is not an allowed predecessor of the
+// event's target status — a replayed or out-of-order event that would move
+// the invoice backwards. The row exists and already reflects newer state, so
+// the listener records the event as processed without applying it
+// (issue #927).
+var ErrStaleStatusTransition = errors.New("stale invoice status transition")
+
+// allowedPriorStatuses returns every lifecycle status that may precede target
+// in the documented invoice lifecycle above. An unknown target is an error:
+// callers only ever name real statuses (and the migration 012 CHECK
+// constraint rejects anything else), so a bad name is a bug worth surfacing
+// rather than silently allowing or blocking every transition.
+func allowedPriorStatuses(target string) ([]string, error) {
+	targetRank, ok := invoiceStatusRank[target]
+	if !ok {
+		return nil, fmt.Errorf("unknown invoice status %q", target)
+	}
+	allowed := make([]string, 0, len(invoiceStatusRank))
+	for status, rank := range invoiceStatusRank {
+		if rank < targetRank {
+			allowed = append(allowed, status)
+		}
+	}
+	return allowed, nil
+}
+
+// execInvoiceUpdate runs one of the guarded invoice UPDATE statements and
+// translates an empty command tag into a sentinel error (issue #927). A
+// successful statement with no error but zero rows affected means the WHERE
+// clause matched nothing: either the invoice row is missing
+// (ErrInvoiceNotFound) or the status guard rejected a stale event
+// (ErrStaleStatusTransition). A follow-up existence probe — run only on this
+// failure path — tells the two apart so callers can retry the former and
+// record the latter as handled.
+func execInvoiceUpdate(ctx context.Context, q Querier, op, query, invoiceID string, args ...any) error {
+	tag, err := q.Exec(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("queries: %s: %w", op, err)
+	}
+	if tag.RowsAffected() > 0 {
+		return nil
+	}
+	var exists bool
+	if err := q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM invoices WHERE id = $1)`, invoiceID).Scan(&exists); err != nil {
+		return fmt.Errorf("queries: %s: probe invoice %s: %w", op, invoiceID, err)
+	}
+	if !exists {
+		return fmt.Errorf("queries: %s invoice %s: %w", op, invoiceID, ErrInvoiceNotFound)
+	}
+	return fmt.Errorf("queries: %s invoice %s: %w", op, invoiceID, ErrStaleStatusTransition)
+}
+
 func UpdateInvoiceListed(ctx context.Context, q Querier, id string, status string, discountBps int) error {
-	query := `
-		UPDATE invoices 
-		SET status = $1, discount_bps = $2
-		WHERE id = $3
-	`
-	_, err := q.Exec(ctx, query, status, discountBps, id)
+	allowed, err := allowedPriorStatuses(status)
 	if err != nil {
 		return fmt.Errorf("queries: update invoice listed: %w", err)
 	}
-	return nil
+	query := `
+		UPDATE invoices 
+		SET status = $1, discount_bps = $2
+		WHERE id = $3 AND status = ANY($4)
+	`
+	return execInvoiceUpdate(ctx, q, "update invoice listed", query, id, status, discountBps, id, allowed)
 }
 
 func UpdateInvoiceFunded(ctx context.Context, q Querier, id string, status string, fundedAmount string, fundedAt int64) error {
-	query := `
-		UPDATE invoices 
-		SET status = $1, funded_amount = $2, funded_at = $3
-		WHERE id = $4
-	`
-	_, err := q.Exec(ctx, query, status, fundedAmount, fundedAt, id)
+	allowed, err := allowedPriorStatuses(status)
 	if err != nil {
 		return fmt.Errorf("queries: update invoice funded: %w", err)
 	}
-	return nil
+	query := `
+		UPDATE invoices 
+		SET status = $1, funded_amount = $2, funded_at = $3
+		WHERE id = $4 AND status = ANY($5)
+	`
+	return execInvoiceUpdate(ctx, q, "update invoice funded", query, id, status, fundedAmount, fundedAt, id, allowed)
 }
 
 func UpdateInvoiceShipped(ctx context.Context, q Querier, id string, status string, shippedAt int64) error {
-	query := `
-		UPDATE invoices 
-		SET status = $1, shipped_at = $2, issuer_confirmed = TRUE
-		WHERE id = $3
-	`
-	_, err := q.Exec(ctx, query, status, shippedAt, id)
+	allowed, err := allowedPriorStatuses(status)
 	if err != nil {
 		return fmt.Errorf("queries: update invoice shipped: %w", err)
 	}
-	return nil
+	query := `
+		UPDATE invoices 
+		SET status = $1, shipped_at = $2, issuer_confirmed = TRUE
+		WHERE id = $3 AND status = ANY($4)
+	`
+	return execInvoiceUpdate(ctx, q, "update invoice shipped", query, id, status, shippedAt, id, allowed)
 }
 
 func UpdateInvoiceDeliveryConfirmed(ctx context.Context, q Querier, id string, status string, buyerConfirmedAt int64) error {
-	query := `
-		UPDATE invoices 
-		SET status = $1, buyer_confirmed = TRUE, buyer_confirmed_at = $2
-		WHERE id = $3
-	`
-	_, err := q.Exec(ctx, query, status, buyerConfirmedAt, id)
+	allowed, err := allowedPriorStatuses(status)
 	if err != nil {
 		return fmt.Errorf("queries: update invoice delivery confirmed: %w", err)
 	}
-	return nil
+	query := `
+		UPDATE invoices 
+		SET status = $1, buyer_confirmed = TRUE, buyer_confirmed_at = $2
+		WHERE id = $3 AND status = ANY($4)
+	`
+	return execInvoiceUpdate(ctx, q, "update invoice delivery confirmed", query, id, status, buyerConfirmedAt, id, allowed)
 }
 
 func UpdateInvoiceRepaid(ctx context.Context, q Querier, id string, status string, repaidAt int64) error {
-	query := `
-		UPDATE invoices 
-		SET status = $1, repaid_at = $2
-		WHERE id = $3
-	`
-	_, err := q.Exec(ctx, query, status, repaidAt, id)
+	allowed, err := allowedPriorStatuses(status)
 	if err != nil {
 		return fmt.Errorf("queries: update invoice repaid: %w", err)
 	}
-	return nil
+	query := `
+		UPDATE invoices 
+		SET status = $1, repaid_at = $2
+		WHERE id = $3 AND status = ANY($4)
+	`
+	return execInvoiceUpdate(ctx, q, "update invoice repaid", query, id, status, repaidAt, id, allowed)
 }
 
 func UpdateInvoiceStatus(ctx context.Context, q Querier, id string, status string) error {
-	query := `
-		UPDATE invoices 
-		SET status = $1
-		WHERE id = $2
-	`
-	_, err := q.Exec(ctx, query, status, id)
+	allowed, err := allowedPriorStatuses(status)
 	if err != nil {
 		return fmt.Errorf("queries: update invoice status: %w", err)
 	}
-	return nil
+	query := `
+		UPDATE invoices 
+		SET status = $1
+		WHERE id = $2 AND status = ANY($3)
+	`
+	return execInvoiceUpdate(ctx, q, "update invoice status", query, id, status, id, allowed)
 }
 
+// UpdateInvoiceAttestation records an underwriting attestation. It changes no
+// status, so it carries no lifecycle guard — but it still checks the command
+// tag (issue #927): an attestation for an invoice that has not been indexed
+// yet must surface ErrInvoiceNotFound instead of silently affecting 0 rows.
 func UpdateInvoiceAttestation(ctx context.Context, q Querier, invoiceID, agentID, evidenceHash string, riskScoreBps int, attestedAt int64) error {
 	query := `
 		UPDATE invoices 
 		SET attestation_agent_id = $1, risk_score_bps = $2, evidence_hash = $3, attested_at = $4
 		WHERE id = $5
 	`
-	_, err := q.Exec(ctx, query, agentID, riskScoreBps, evidenceHash, attestedAt, invoiceID)
-	if err != nil {
-		return fmt.Errorf("queries: update invoice attestation: %w", err)
-	}
-	return nil
+	return execInvoiceUpdate(ctx, q, "update invoice attestation", query, invoiceID, agentID, riskScoreBps, evidenceHash, attestedAt, invoiceID)
 }
 
 func GetPoolStats(ctx context.Context) (*DbPoolStats, error) {

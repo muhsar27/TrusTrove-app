@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -773,6 +774,180 @@ func TestInvoiceCheckConstraints(t *testing.T) {
 				t.Errorf("%s: expected constraint violation, got nil error", tc.name)
 			}
 		})
+	}
+}
+
+// TestAllowedPriorStatuses pins the documented lifecycle guard of issue #927:
+// every status strictly before the target may precede it, the terminals are
+// mutually exclusive, and unknown targets are rejected. Runs without a DB.
+func TestAllowedPriorStatuses(t *testing.T) {
+	contains := func(list []string, s string) bool {
+		for _, v := range list {
+			if v == s {
+				return true
+			}
+		}
+		return false
+	}
+
+	listed, err := allowedPriorStatuses("Listed")
+	if err != nil {
+		t.Fatalf("allowedPriorStatuses(Listed): %v", err)
+	}
+	if len(listed) != 1 || listed[0] != "Created" {
+		t.Errorf("allowedPriorStatuses(Listed) = %v, want [Created]", listed)
+	}
+
+	created, err := allowedPriorStatuses("Created")
+	if err != nil {
+		t.Fatalf("allowedPriorStatuses(Created): %v", err)
+	}
+	if len(created) != 0 {
+		t.Errorf("allowedPriorStatuses(Created) = %v, want empty (nothing precedes Created)", created)
+	}
+
+	funded, err := allowedPriorStatuses("Funded")
+	if err != nil {
+		t.Fatalf("allowedPriorStatuses(Funded): %v", err)
+	}
+	if !contains(funded, "Created") || !contains(funded, "Listed") || contains(funded, "Funded") || contains(funded, "Active") {
+		t.Errorf("allowedPriorStatuses(Funded) = %v, want exactly Created and Listed", funded)
+	}
+
+	// Repaid and Defaulted are mutually exclusive terminals: a Repaid
+	// invoice must not be reachable by a Defaulted event and vice versa.
+	repaid, err := allowedPriorStatuses("Repaid")
+	if err != nil {
+		t.Fatalf("allowedPriorStatuses(Repaid): %v", err)
+	}
+	for _, s := range []string{"Created", "Listed", "Funded", "Active", "Confirmed"} {
+		if !contains(repaid, s) {
+			t.Errorf("allowedPriorStatuses(Repaid) missing %q: %v", s, repaid)
+		}
+	}
+	if contains(repaid, "Repaid") || contains(repaid, "Defaulted") {
+		t.Errorf("allowedPriorStatuses(Repaid) = %v, must not include the terminals", repaid)
+	}
+
+	defaulted, err := allowedPriorStatuses("Defaulted")
+	if err != nil {
+		t.Fatalf("allowedPriorStatuses(Defaulted): %v", err)
+	}
+	if contains(defaulted, "Repaid") {
+		t.Errorf("allowedPriorStatuses(Defaulted) = %v, must not allow Repaid (mutually exclusive terminals)", defaulted)
+	}
+	if !contains(defaulted, "Funded") {
+		t.Errorf("allowedPriorStatuses(Defaulted) = %v, missing Funded", defaulted)
+	}
+
+	if _, err := allowedPriorStatuses("Bogus"); err == nil {
+		t.Error("allowedPriorStatuses(Bogus): expected error for unknown status, got nil")
+	}
+}
+
+// TestUpdateInvoiceMissingRowReturnsNotFound covers issue #927's first
+// acceptance criterion: every Update* writer must report a wrapped
+// ErrInvoiceNotFound when the invoice row does not exist, instead of
+// succeeding with 0 rows affected and letting the listener record the event
+// as processed.
+func TestUpdateInvoiceMissingRowReturnsNotFound(t *testing.T) {
+	skipIfNoDB(t)
+
+	ctx := context.Background()
+	id := fmt.Sprintf("missing%d", time.Now().UnixNano())
+
+	writers := []struct {
+		name string
+		fn   func() error
+	}{
+		{"Listed", func() error { return UpdateInvoiceListed(ctx, Pool, id, "Listed", 100) }},
+		{"Funded", func() error { return UpdateInvoiceFunded(ctx, Pool, id, "Funded", "1000", time.Now().Unix()) }},
+		{"Shipped", func() error { return UpdateInvoiceShipped(ctx, Pool, id, "Active", time.Now().Unix()) }},
+		{"DeliveryConfirmed", func() error { return UpdateInvoiceDeliveryConfirmed(ctx, Pool, id, "Confirmed", time.Now().Unix()) }},
+		{"Repaid", func() error { return UpdateInvoiceRepaid(ctx, Pool, id, "Repaid", time.Now().Unix()) }},
+		{"Status", func() error { return UpdateInvoiceStatus(ctx, Pool, id, "Defaulted") }},
+		{"Attestation", func() error { return UpdateInvoiceAttestation(ctx, Pool, id, "agent", "hash", 100, time.Now().Unix()) }},
+	}
+	for _, w := range writers {
+		t.Run(w.name, func(t *testing.T) {
+			err := w.fn()
+			if !errors.Is(err, ErrInvoiceNotFound) {
+				t.Fatalf("got %v, want wrapped ErrInvoiceNotFound", err)
+			}
+		})
+	}
+}
+
+// TestUpdateInvoiceStaleTransitionRejected covers issue #927's second
+// acceptance criterion: a replayed older event must not move an invoice
+// backwards. The guard rejects it with ErrStaleStatusTransition (row exists,
+// transition not allowed) — distinct from ErrInvoiceNotFound — and leaves the
+// row untouched, while forward transitions keep working.
+func TestUpdateInvoiceStaleTransitionRejected(t *testing.T) {
+	skipIfNoDB(t)
+
+	ctx := context.Background()
+	id := fmt.Sprintf("stale%d", time.Now().UnixNano())
+
+	inv := newTestInvoice(id)
+	inv.Status = "Funded"
+	inv.FundedAmount = "500000000"
+	if err := InsertInvoice(ctx, Pool, inv); err != nil {
+		t.Fatalf("InsertInvoice: %v", err)
+	}
+	t.Cleanup(func() {
+		if Pool != nil {
+			_, _ = Pool.Exec(ctx, "DELETE FROM invoices WHERE id = $1", id)
+		}
+	})
+
+	// A replayed InvoiceListed must not rewind Funded -> Listed, nor
+	// overwrite the discount bps the funded state implies.
+	if err := UpdateInvoiceListed(ctx, Pool, id, "Listed", 123); !errors.Is(err, ErrStaleStatusTransition) {
+		t.Fatalf("UpdateInvoiceListed on Funded: got %v, want wrapped ErrStaleStatusTransition", err)
+	}
+	// A replayed InvoiceFunded for an already-funded invoice is a no-op too.
+	if err := UpdateInvoiceFunded(ctx, Pool, id, "Funded", "1", 1); !errors.Is(err, ErrStaleStatusTransition) {
+		t.Fatalf("UpdateInvoiceFunded on Funded: got %v, want wrapped ErrStaleStatusTransition", err)
+	}
+
+	got, err := GetInvoiceByID(ctx, Pool, id)
+	if err != nil || got == nil {
+		t.Fatalf("GetInvoiceByID: err=%v, got=%v", err, got)
+	}
+	if got.Status != "Funded" {
+		t.Errorf("Status after rejected stale events: got %q, want %q", got.Status, "Funded")
+	}
+	if got.DiscountBps != 0 {
+		t.Errorf("DiscountBps after rejected stale listed event: got %d, want 0", got.DiscountBps)
+	}
+	if got.FundedAmount != "500000000" {
+		t.Errorf("FundedAmount after rejected stale funded event: got %q, want %q", got.FundedAmount, "500000000")
+	}
+
+	// Forward transitions still apply: Funded -> Active.
+	if err := UpdateInvoiceShipped(ctx, Pool, id, "Active", time.Now().Unix()); err != nil {
+		t.Fatalf("UpdateInvoiceShipped (forward): %v", err)
+	}
+	got, err = GetInvoiceByID(ctx, Pool, id)
+	if err != nil || got == nil {
+		t.Fatalf("GetInvoiceByID after forward transition: err=%v, got=%v", err, got)
+	}
+	if got.Status != "Active" {
+		t.Errorf("Status after forward transition: got %q, want %q", got.Status, "Active")
+	}
+
+	// Once repaid, a replayed funding event must be rejected outright.
+	if err := UpdateInvoiceStatus(ctx, Pool, id, "Repaid"); err != nil {
+		t.Fatalf("UpdateInvoiceStatus(Repaid): %v", err)
+	}
+	if err := UpdateInvoiceFunded(ctx, Pool, id, "Funded", "1", 1); !errors.Is(err, ErrStaleStatusTransition) {
+		t.Fatalf("UpdateInvoiceFunded on Repaid: got %v, want wrapped ErrStaleStatusTransition", err)
+	}
+	// Terminal states are mutually exclusive: Defaulted is not reachable
+	// from Repaid either.
+	if err := UpdateInvoiceStatus(ctx, Pool, id, "Defaulted"); !errors.Is(err, ErrStaleStatusTransition) {
+		t.Fatalf("UpdateInvoiceStatus(Defaulted) on Repaid: got %v, want wrapped ErrStaleStatusTransition", err)
 	}
 }
 
