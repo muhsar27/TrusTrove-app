@@ -66,10 +66,12 @@ Open [http://localhost:3000](http://localhost:3000), connect Freighter on testne
 ### 7. Build and test
 
 ```bash
-pnpm build             # SDK + CLI + web app
-pnpm test               # SDK + SDK-React + CLI + web app unit tests
+pnpm build             # SDK + SDK React + CLI + web app
+pnpm test               # SDK + SDK React + CLI + web app unit tests
 cd indexer && go test ./...   # Go indexer unit tests
 ```
+
+Command coverage: `pnpm build` builds SDK, SDK React, CLI, and web; `pnpm test` runs tests for those packages; `pnpm lint` covers SDK and web; and `pnpm typecheck` builds SDK, SDK React, and CLI before checking TypeScript across the workspaces. Go database integration tests require `TEST_DATABASE_URL`. For the local Compose database use `postgres://postgres:<POSTGRES_PASSWORD>@localhost:5433/postgres?sslmode=disable`.
 
 ## Full local stack with Docker Compose
 

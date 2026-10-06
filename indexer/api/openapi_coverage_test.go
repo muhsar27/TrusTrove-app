@@ -41,7 +41,8 @@ func TestOpenAPISpecCoversRouterRoutes(t *testing.T) {
 
 	// Build the real application router
 	h := readonlyTestHandler(t)
-	r := NewRouter(h)
+	r, stopRouter := NewRouter(h)
+	t.Cleanup(stopRouter)
 
 	// Walk the router and check each route is in the spec
 	var missing []string

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -103,7 +104,8 @@ func TestHealthEndpoint_Returns200WhenListenerAndDBAreHealthy(t *testing.T) {
 	h.listenerHealth = NewListenerHealth()
 	h.listenerHealth.MarkStarted()
 
-	router := NewRouter(h)
+	router, stopRouter := NewRouter(h)
+	t.Cleanup(stopRouter)
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rr := httptest.NewRecorder()
 
@@ -117,13 +119,51 @@ func TestHealthEndpoint_Returns200WhenListenerAndDBAreHealthy(t *testing.T) {
 	}
 }
 
+func TestMetricsEndpoint_RequiresConfiguredToken(t *testing.T) {
+	h := newTestHandler(t)
+	h.cfg.MetricsToken = "metrics-secret"
+	router, stopRouter := NewRouter(h)
+	t.Cleanup(stopRouter)
+
+	for _, authorization := range []string{"", "Bearer wrong"} {
+		req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+		req.Header.Set("Authorization", authorization)
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("authorization %q: got %d, want %d", authorization, rr.Code, http.StatusUnauthorized)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set("Authorization", "Bearer metrics-secret")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("valid token: got %d, want %d", rr.Code, http.StatusOK)
+	}
+}
+
+func TestMetricsEndpoint_RemainsPublicForLocalDevelopment(t *testing.T) {
+	h := newTestHandler(t)
+	h.cfg.MetricsToken = ""
+	router, stopRouter := NewRouter(h)
+	t.Cleanup(stopRouter)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unset token: got %d, want %d", rr.Code, http.StatusOK)
+	}
+}
+
 func TestHealthEndpoint_Returns503WhenListenerStops(t *testing.T) {
 	h := newTestHandler(t)
 	h.dbHealthChecker = func(context.Context) error { return nil }
 	h.listenerHealth = NewListenerHealth()
 	h.listenerHealth.MarkStopped()
 
-	router := NewRouter(h)
+	router, stopRouter := NewRouter(h)
+	t.Cleanup(stopRouter)
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rr := httptest.NewRecorder()
 
@@ -330,6 +370,36 @@ func TestPerClientRateLimiter_MaxSizeEviction(t *testing.T) {
 	}
 }
 
+// TestPerClientRateLimiter_ConcurrentEviction drives allow() from many
+// goroutines against a small maxSize so evictOldest() runs concurrently with
+// token refills. Run with -race to detect unsynchronised bucket.last access.
+func TestPerClientRateLimiter_ConcurrentEviction(t *testing.T) {
+	maxSize := 8
+	rl := newPerClientRateLimiter(10, 20, maxSize)
+	defer rl.Stop()
+
+	const goroutines = 32
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				rl.allow(fmt.Sprintf("ip:10.0.%d.%d", g, i))
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	rl.mu.RLock()
+	bucketCount := len(rl.buckets)
+	rl.mu.RUnlock()
+
+	if bucketCount > maxSize+1 {
+		t.Errorf("bucket count %d exceeds maxSize %d", bucketCount, maxSize)
+	}
+}
+
 func TestPerClientRateLimiter_StaleEviction(t *testing.T) {
 	rl := newPerClientRateLimiter(10, 20, 1000)
 	defer rl.Stop()
@@ -401,7 +471,8 @@ func TestRouter_PublicReadRoutesAreRateLimited(t *testing.T) {
 	h.getPoolStatsFn = func(context.Context) (*db.DbPoolStats, error) {
 		return &db.DbPoolStats{}, nil
 	}
-	router := NewRouter(h)
+	router, stopRouter := NewRouter(h)
+	t.Cleanup(stopRouter)
 
 	const maxRequests = 6
 	allowed, limited := 0, 0
@@ -425,5 +496,34 @@ func TestRouter_PublicReadRoutesAreRateLimited(t *testing.T) {
 	}
 	if limited == 0 {
 		t.Fatalf("expected status %d once the client exceeded the configured RPS", http.StatusTooManyRequests)
+	}
+}
+
+func TestRouter_InvoiceCreationRateLimitBlocksSixthRequest(t *testing.T) {
+	h := newTestHandler(t)
+	h.cfg.RateLimitRPS = 100
+	h.cfg.InvoiceRateLimit = 5
+	h.cfg.InvoiceRateLimitWindow = time.Hour
+	router, stopRouter := NewRouter(h)
+	t.Cleanup(stopRouter)
+
+	token := createTestJWT(h.cfg.JWTSecret, "GCLIENT919")
+	for i := 1; i <= 6; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/invoices", strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer "+token)
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+
+		if i < 6 && rr.Code == http.StatusTooManyRequests {
+			t.Fatalf("request %d was rate limited before the configured limit", i)
+		}
+		if i == 6 {
+			if rr.Code != http.StatusTooManyRequests {
+				t.Fatalf("sixth request status=%d, want %d; body=%s", rr.Code, http.StatusTooManyRequests, rr.Body.String())
+			}
+			if rr.Header().Get("Retry-After") == "" {
+				t.Fatal("sixth request did not include Retry-After")
+			}
+		}
 	}
 }

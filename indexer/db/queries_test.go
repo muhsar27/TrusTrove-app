@@ -14,7 +14,7 @@ import (
 func skipIfNoDB(t *testing.T) {
 	t.Helper()
 	if os.Getenv("TEST_DATABASE_URL") == "" {
-		t.Skip("TEST_DATABASE_URL not set — skipping DB integration test")
+		t.Skip("TEST_DATABASE_URL not set â€” skipping DB integration test")
 	}
 }
 
@@ -52,7 +52,7 @@ func TestInsertAndGetInvoice(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		if Pool != nil {
-			Pool.Exec(ctx, "DELETE FROM invoices WHERE id = $1", id)
+			_, _ = Pool.Exec(ctx, "DELETE FROM invoices WHERE id = $1", id)
 		}
 	})
 
@@ -114,7 +114,7 @@ func TestGetInvoicesPage(t *testing.T) {
 	t.Cleanup(func() {
 		if Pool != nil {
 			for _, id := range []string{id1, id2} {
-				Pool.Exec(ctx, "DELETE FROM invoices WHERE id = $1", id)
+				_, _ = Pool.Exec(ctx, "DELETE FROM invoices WHERE id = $1", id)
 			}
 		}
 	})
@@ -323,7 +323,7 @@ func TestUpdateInvoiceListed(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		if Pool != nil {
-			Pool.Exec(ctx, "DELETE FROM invoices WHERE id = $1", id)
+			_, _ = Pool.Exec(ctx, "DELETE FROM invoices WHERE id = $1", id)
 		}
 	})
 
@@ -353,7 +353,7 @@ func TestUpdateInvoiceFunded(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		if Pool != nil {
-			Pool.Exec(ctx, "DELETE FROM invoices WHERE id = $1", id)
+			_, _ = Pool.Exec(ctx, "DELETE FROM invoices WHERE id = $1", id)
 		}
 	})
 
@@ -387,12 +387,12 @@ func TestUpdateInvoiceShipped(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		if Pool != nil {
-			Pool.Exec(ctx, "DELETE FROM invoices WHERE id = $1", id)
+			_, _ = Pool.Exec(ctx, "DELETE FROM invoices WHERE id = $1", id)
 		}
 	})
 
 	shippedAt := time.Now().Unix()
-	if err := UpdateInvoiceShipped(ctx, Pool, id, "Shipped", shippedAt); err != nil {
+	if err := UpdateInvoiceShipped(ctx, Pool, id, "Active", shippedAt); err != nil {
 		t.Fatalf("UpdateInvoiceShipped: %v", err)
 	}
 
@@ -421,7 +421,7 @@ func TestUpdateInvoiceDeliveryConfirmed(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		if Pool != nil {
-			Pool.Exec(ctx, "DELETE FROM invoices WHERE id = $1", id)
+			_, _ = Pool.Exec(ctx, "DELETE FROM invoices WHERE id = $1", id)
 		}
 	})
 
@@ -455,7 +455,7 @@ func TestUpdateInvoiceRepaid(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		if Pool != nil {
-			Pool.Exec(ctx, "DELETE FROM invoices WHERE id = $1", id)
+			_, _ = Pool.Exec(ctx, "DELETE FROM invoices WHERE id = $1", id)
 		}
 	})
 
@@ -486,7 +486,7 @@ func TestUpdateInvoiceStatus(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		if Pool != nil {
-			Pool.Exec(ctx, "DELETE FROM invoices WHERE id = $1", id)
+			_, _ = Pool.Exec(ctx, "DELETE FROM invoices WHERE id = $1", id)
 		}
 	})
 
@@ -563,7 +563,7 @@ func TestLogEventAndProcessedLookups(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		if Pool != nil {
-			Pool.Exec(ctx, "DELETE FROM events_log WHERE event_id = $1", eventID)
+			_, _ = Pool.Exec(ctx, "DELETE FROM events_log WHERE event_id = $1", eventID)
 		}
 	})
 
@@ -691,7 +691,7 @@ func TestUpdateInvoiceAttestation(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		if Pool != nil {
-			Pool.Exec(ctx, "DELETE FROM invoices WHERE id = $1", id)
+			_, _ = Pool.Exec(ctx, "DELETE FROM invoices WHERE id = $1", id)
 		}
 	})
 
@@ -737,19 +737,19 @@ func TestUpdateInvoiceAttestation(t *testing.T) {
 	}
 }
 
-// TestInvoiceCheckConstraints proves the migration 011 CHECK constraints reject
+// TestInvoiceCheckConstraints proves the migration 012 CHECK constraints reject
 // values the application code would otherwise silently accept.
 func TestInvoiceCheckConstraints(t *testing.T) {
 	skipIfNoDB(t)
 
 	ctx := context.Background()
 	id := fmt.Sprintf("constraint-test%d", time.Now().UnixNano())
-	if err := InsertInvoice(ctx, newTestInvoice(id)); err != nil {
+	if err := InsertInvoice(ctx, Pool, newTestInvoice(id)); err != nil {
 		t.Fatalf("InsertInvoice: %v", err)
 	}
 	t.Cleanup(func() {
 		if Pool != nil {
-			Pool.Exec(ctx, "DELETE FROM invoices WHERE id = $1", id)
+			_, _ = Pool.Exec(ctx, "DELETE FROM invoices WHERE id = $1", id)
 		}
 	})
 
@@ -783,7 +783,9 @@ func TestPoolSnapshotsConstraints(t *testing.T) {
 
 	ctx := context.Background()
 	if _, err := Pool.Exec(ctx, `INSERT INTO pool_snapshots (id) VALUES (2)`); err == nil {
-		Pool.Exec(ctx, `DELETE FROM pool_snapshots WHERE id = 2`)
+		if Pool != nil {
+			_, _ = Pool.Exec(ctx, "DELETE FROM pool_snapshots WHERE id = 2")
+		}
 		t.Error("second pool_snapshots row: expected constraint violation, got nil error")
 	}
 	if _, err := Pool.Exec(ctx, `UPDATE pool_snapshots SET utilization_rate_bps = 10001 WHERE id = 1`); err == nil {

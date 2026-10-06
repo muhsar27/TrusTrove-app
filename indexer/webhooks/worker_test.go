@@ -228,7 +228,7 @@ func TestAttemptDelivery2xx(t *testing.T) {
 		gotCT = r.Header.Get("Content-Type")
 		gotBody, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	}))
 	defer srv.Close()
 
@@ -294,7 +294,7 @@ func TestAttemptDeliveryNon2xx(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotStatus = code
 				w.WriteHeader(code)
-				w.Write([]byte("error"))
+				_, _ = w.Write([]byte("error"))
 			}))
 			defer srv.Close()
 

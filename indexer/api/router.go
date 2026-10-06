@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/golang-jwt/jwt/v5"
+	indexermiddleware "trusttrove/indexer/middleware"
 )
 
 func AuthMiddleware(jwtSecret string) func(http.Handler) http.Handler {
@@ -122,7 +123,7 @@ func RecoveryMiddleware() func(http.Handler) http.Handler {
 
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusInternalServerError)
-					w.Write([]byte(`{"error": "internal server error"}`))
+					_, _ = w.Write([]byte(`{"error": "internal server error"}`))
 				}
 			}()
 			next.ServeHTTP(w, r)
@@ -208,12 +209,17 @@ func (rl *perClientRateLimiter) allow(clientKey string) bool {
 }
 
 func (rl *perClientRateLimiter) evictOldest() {
+	// rl.mu is held by the caller; bucket.mu must be taken before reading
+	// bucket.last so evictOldest never races with allow()'s refill updates.
 	var oldestKey string
 	var oldestTime time.Time
 	for key, bucket := range rl.buckets {
-		if oldestKey == "" || bucket.last.Before(oldestTime) {
+		bucket.mu.Lock()
+		last := bucket.last
+		bucket.mu.Unlock()
+		if oldestKey == "" || last.Before(oldestTime) {
 			oldestKey = key
-			oldestTime = bucket.last
+			oldestTime = last
 		}
 	}
 	if oldestKey != "" {
@@ -268,12 +274,11 @@ func RateLimitMiddleware(rl *perClientRateLimiter) func(http.Handler) http.Handl
 	}
 }
 
-func NewRouter(h *APIHandler) *chi.Mux {
+func NewRouter(h *APIHandler) (*chi.Mux, func()) {
 	r := chi.NewRouter()
 
 	// Global middleware
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(RecoveryMiddleware())
 	r.Use(CORSMiddleware(h.cfg.CORSAllowedOrigins))
@@ -282,9 +287,17 @@ func NewRouter(h *APIHandler) *chi.Mux {
 	// Per-client rate limiter for auth and invoice creation
 	// Max 1000 clients to bound memory usage
 	rl := newPerClientRateLimiter(h.cfg.RateLimitRPS, h.cfg.RateLimitRPS*2, 1000)
+	invoiceLimiter := indexermiddleware.NewInvoiceRateLimiterWithConfig(h.cfg.InvoiceRateLimit, h.cfg.InvoiceRateLimitWindow)
 
-	// Prometheus metrics
-	r.Get("/metrics", MetricsHandler().ServeHTTP)
+	// Prometheus metrics are public for local development, but deployments can
+	// require a bearer token without changing the scrape URL.
+	metrics := MetricsHandler().ServeHTTP
+	if h.cfg.MetricsToken == "" {
+		slog.Warn("metrics endpoint is unauthenticated; set METRICS_TOKEN in production")
+		r.Get("/metrics", metrics)
+	} else {
+		r.With(metricsTokenMiddleware(h.cfg.MetricsToken)).Get("/metrics", metrics)
+	}
 
 	// Health check
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -293,11 +306,11 @@ func NewRouter(h *APIHandler) *chi.Mux {
 		defer cancel()
 		if err := h.CheckHealth(ctx); err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(`{"status": "degraded", "error": "listener or database unavailable"}`))
+			_, _ = w.Write([]byte(`{"status": "degraded", "error": "listener or database unavailable"}`))
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status": "ok"}`))
+		_, _ = w.Write([]byte(`{"status": "ok"}`))
 	})
 
 	// Unprotected authentication routes (rate limited)
@@ -322,8 +335,16 @@ func NewRouter(h *APIHandler) *chi.Mux {
 	// Protected routes (rate limited)
 	r.Group(func(r chi.Router) {
 		r.Use(AuthMiddleware(h.cfg.JWTSecret))
+		r.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if addr, ok := GetUserAddress(req.Context()); ok {
+					req = req.WithContext(indexermiddleware.WithClientAddress(req.Context(), addr))
+				}
+				next.ServeHTTP(w, req)
+			})
+		})
 		r.Use(RateLimitMiddleware(rl))
-		r.Post("/invoices", h.HandleCreateInvoice)
+		r.With(indexermiddleware.InvoiceRateLimitMiddleware(invoiceLimiter)).Post("/invoices", h.HandleCreateInvoice)
 
 		// Webhooks
 		r.Post("/webhooks", h.HandleCreateWebhook)
@@ -331,5 +352,20 @@ func NewRouter(h *APIHandler) *chi.Mux {
 		r.Delete("/webhooks/{id}", h.HandleDeleteWebhook)
 	})
 
-	return r
+	return r, func() {
+		rl.Stop()
+		invoiceLimiter.Stop()
+	}
+}
+
+func metricsTokenMiddleware(expected string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer "+expected {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
